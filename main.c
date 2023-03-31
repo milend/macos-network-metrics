@@ -20,8 +20,10 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
+#include <stdbool.h>
 #include <errno.h>
 #include <net/if.h>
+#include <net/if_mib.h>
 #include <net/route.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -34,7 +36,7 @@ struct NetworkMetrics {
     uint64_t totalInputPackets, totalOutputPackets;
 };
 
-static struct NetworkMetrics GetNetworkMetrics(void) {
+static struct NetworkMetrics GetNetworkMetrics(bool useIfmibData) {
     int mib[] = {
         CTL_NET,
         PF_ROUTE,
@@ -67,10 +69,38 @@ static struct NetworkMetrics GetNetworkMetrics(void) {
             //
             // To detect the loopback interface, use `message2->ifm_flags`
             // and check for the `IFF_LOOPBACK` flag.
-            metrics.totalInputPackets += message2->ifm_data.ifi_ipackets;
-            metrics.totalOutputPackets += message2->ifm_data.ifi_opackets;
-            metrics.totalInputBytes += message2->ifm_data.ifi_ibytes;
-            metrics.totalOutputBytes += message2->ifm_data.ifi_obytes;
+            if (useIfmibData) {
+                int mib2[] = {
+                    CTL_NET,
+                    PF_LINK,
+                    NETLINK_GENERIC,
+                    IFMIB_IFDATA,
+                    message->ifm_index,
+                    IFDATA_GENERAL
+                };
+
+                struct ifmibdata mibdata = (struct ifmibdata){};
+                size_t mibdata_len = sizeof(mibdata);
+                if (sysctl(mib2, 6, &mibdata, &mibdata_len, NULL, 0) < 0) {
+                    fprintf(stderr, "sysctl: %s\n", strerror(errno));
+                    exit(1);
+                }
+
+                // The fields in `ifmd_data` do _not_ suffer from 4GiB truncation.
+                // In addition, the 1KiB batching present in the `ifm_data` does
+                // not apply to this API (though that seems like an security
+                // issue that hasn't yet been fixed).
+                metrics.totalInputPackets += mibdata.ifmd_data.ifi_ipackets;
+                metrics.totalOutputPackets += mibdata.ifmd_data.ifi_opackets;
+                metrics.totalInputBytes += mibdata.ifmd_data.ifi_ibytes;
+                metrics.totalOutputBytes += mibdata.ifmd_data.ifi_obytes;
+            } else {
+                // The fields in `ifm_data` suffer from 4GiB truncation on macOS 13.2.1 (at the time of writing).
+                metrics.totalInputPackets += message2->ifm_data.ifi_ipackets;
+                metrics.totalOutputPackets += message2->ifm_data.ifi_opackets;
+                metrics.totalInputBytes += message2->ifm_data.ifi_ibytes;
+                metrics.totalOutputBytes += message2->ifm_data.ifi_obytes;
+            }
         }
 
         next += message->ifm_msglen;
@@ -80,11 +110,12 @@ static struct NetworkMetrics GetNetworkMetrics(void) {
 }
 
 int main(int argc, const char *argv[]) {
-    struct NetworkMetrics lastMetrics = GetNetworkMetrics();
+    bool useIfmibData = true;
+    struct NetworkMetrics lastMetrics = GetNetworkMetrics(useIfmibData);
 
     while (1) {
         sleep(1);
-        struct NetworkMetrics currentMetrics = GetNetworkMetrics();
+        struct NetworkMetrics currentMetrics = GetNetworkMetrics(useIfmibData);
 
         printf("--- PACKETS ---\n");
         uint64_t inputPacketsDelta = currentMetrics.totalInputPackets - lastMetrics.totalInputPackets;
