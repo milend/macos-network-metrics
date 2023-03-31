@@ -8,3 +8,5 @@ To run, execute the following commands:
 $ make
 $ ./network_metrics
 ```
+
+For more details, see [macOS Network Metrics Using sysctl()](https://milen.me/writings/macos-network-metrics-sysctl-net-rt-iflist2/).
